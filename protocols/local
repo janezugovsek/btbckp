@@ -1,0 +1,48 @@
+function DEFAULT_CONFIG
+	{
+	local conf_name=${1:-"Unknown"}
+	echo "
+	# Server configuration '$conf_name' for protocol 'local'
+	# Comments are begins with '#'
+	# Coding type is bash
+
+	# Type of protocol (do not change!)
+	PROTOCOL=local
+	
+	# Absolute path to the backup directory
+	DIR=/backup/
+	" | sed -e 's/^[ \t]*//'
+	}
+
+function CHECK_PROGRAMS
+	{
+	return 0
+	}
+
+function MOUNT
+	{
+	# check argument parameter
+	local server=${1:-`LOG_ERROR "Wrong parameter: server_name" 1>&2; return 2`}
+	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+
+	mkdir -p "$DIR" &>>/dev/null
+	if [ $? != 0 ]; then
+		LOG_ERROR "Protocol 'local' can not create directory '$DIR'"
+		return 1
+	fi
+	LOG_INFO "Connect 'local' with server '"$(basename "$server" | sed 's/\.conf//g')"'"
+
+	MOUNTPATH=$DIR
+	return 0
+	}
+
+function UMOUNT
+	{
+	# check argument parameter
+	local server=${1:-`LOG_ERROR "Wrong parameter: server_name" 1>&2; return 2`}
+	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+
+	LOG_INFO "Unconnect 'local' with server '"$(basename "$server" | sed 's/\.conf//g')"'"
+	return 0
+	}
+

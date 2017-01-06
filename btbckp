@@ -1,0 +1,1963 @@
+#!/bin/bash
+
+DEFAULT_CONFIG='/etc/btbckp/' # default config directory
+DATE_FORMAT="+%F_%H-%M-%S"
+VERSION="v1.0-rc1"
+
+#######################################
+# argument parser and help printing
+#######################################
+function CHECK_MULTIPLE_ARGS
+	{
+	local value=$1
+	local key=$2
+	# value must be empty
+	[ "$value" != "" ] && echo "ERROR: Multiple arguments ($value/$key) (see help: btbckp -h)" 1>&2 && exit 2
+	}
+
+# parse arguments
+
+while (( $# >= 1 ))
+	do
+	key="$1"
+
+	case $key in
+		--conf)
+			CHECK_MULTIPLE_ARGS "$CONFIG" "$key"
+			CONFIG="$2"
+			shift # past argument
+			;;
+
+		-b|--backup)
+			CHECK_MULTIPLE_ARGS "$BACKUP_NAME" "$key"
+			BACKUP_NAME="$2"
+			shift # past argument
+			;;
+
+		-s|--server)
+			CHECK_MULTIPLE_ARGS "$SERVER_NAME" "$key"
+			SERVER_NAME="$2"
+			shift # past argument
+			;;
+
+		-c|-comment)
+			CHECK_MULTIPLE_ARGS "$COMMENT" "$key"
+			COMMENT="$2"
+			shift # past argument
+			;;
+
+		full)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='full'
+			;;
+
+		inc|increment)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='inc'
+			;;
+
+		send)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='send'
+			;;
+
+		cleanlocal)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='cleanlocal'
+			;;
+
+		cleanserver)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='cleanserver'
+			;;
+
+		restore)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='restore'
+			;;
+
+		checksize)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='checksize'
+			;;
+
+		checksha1sum|checksha|checksum)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='checksum'
+			;;
+
+		backup)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='backup'
+			SECTYPE="$2"
+			TERTYPE="$3"
+			shift # past argument
+			shift # past argument
+			;;
+
+		server)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='server'
+			SECTYPE="$2"
+			TERTYPE="$3"
+			shift # past argument
+			shift # past argument
+			;;
+
+		showlog)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='showlog'
+			SECTYPE="$2"
+			shift # past argument
+			;;
+
+		install)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='install'
+			;;
+
+		uninstall)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='uninstall'
+			;;
+		
+		save)
+			CHECK_MULTIPLE_ARGS "$TYPE" "$key"
+			TYPE='save'
+			SECTYPE="$2"
+			shift # past argument
+			;;
+
+		-p|--protocol)
+			CHECK_MULTIPLE_ARGS "$PROTOCOL" "$key"
+			PROTOCOL="$2"
+			shift # past argument
+			;;
+
+		--dry-run)
+			DRYRUN=true
+			;;
+
+		-h|--help)
+			PRINT_HELP="help"
+			break
+			;;
+		
+		--no-status)
+			STATUS=false
+			;;
+
+		-t|--time)
+			CHECK_MULTIPLE_ARGS "$TIME" "$key"
+			TIME="$2"
+			shift # past argument
+			;;
+
+		-l|--log)
+			CHECK_MULTIPLE_ARGS "$LOGSTATUSFILE" "$key"
+			LOGSTATUSFILE="$2"
+			shift # past argument
+			;;
+
+		-e|--logerr)
+			CHECK_MULTIPLE_ARGS "$LOGERRORFILE" "$key"
+			LOGERRORFILE="$2"
+			shift # past argument
+			;;
+
+		-n|--number)
+			CHECK_MULTIPLE_ARGS "$NUMBER" "$key"
+			NUMBER="$2"
+			shift # past argument
+			;;
+
+		-V|--version)
+			PRINT_VERSION="version"
+			;;
+		*)
+		echo "Unknown option: '$key'" 1>&2
+		exit 2
+		;;
+	esac
+	shift # past argument or value
+	# type must have value (first argument), print error and exit
+	[ "$TYPE" == "" ] && echo "ERROR: Wrong first argument (see help: btbckp -h)" 1>&2 && exit 2
+done
+
+#######################################
+# get global configs
+#######################################
+[ "$CONFIG" == "" ] && CONFIG=$DEFAULT_CONFIG
+if [ "$TYPE" != "install" ]; then
+	source "$CONFIG/config.conf" &>>/dev/null
+	if [ $? != 0 ]; then
+		# if file does not exist, pprint error and exit
+		[ ! -f "$CONFIG/config.conf" ] && echo "ERROR: config file ($CONFIG) do not exist" 1>&2 && exit 2
+		echo "ERROR: config file have a bug" 1>&2
+		exit 2
+	fi
+fi
+
+#######################################
+# LOGING FUNCTIONS
+#######################################
+# create time sign
+timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
+
+# change log filenames
+[ "$LOGSTATUSFILE" != "" ] && STATUS_LOG=$LOG_DIR/$LOGSTATUSFILE
+[ "$LOGERRORFILE" != "" ] && ERROR_LOG=$LOG_DIR/$LOGERRORFILE
+
+function LOG_INFO
+	{
+	echo -e "\e[38;5;22mINFO:\e[0m $@"
+	echo -e "$timesign INFO: $@" >> "$STATUS_LOG"
+	}
+
+function LOG_ERROR
+	{
+	echo -e "\e[38;5;1mERROR:\e[0m $@" 1>&2
+	echo -e "$timesign ERROR: $@" >> "$ERROR_LOG"
+	echo -e "$timesign ERROR: $@" >> "$STATUS_LOG"
+	}
+
+function LOG_WARNING
+	{
+	echo -e "\e[38;5;3mWARNING:\e[0m $@" 1>&2
+	echo -e "$timesign WARNING: $@" >> "$ERROR_LOG"
+	echo -e "$timesign WARNING: $@" >> "$STATUS_LOG"
+	}
+
+# function check and save backups into directory
+# call as: SENDTODIR backup_conf_name destination_path
+function SENDTODIR
+	{
+	# get & check arguments
+	local backup_name=${1:-`LOG_ERROR "Wrong parameter: backup name" 1>&2; exit 2`}
+	if [ $? != 0 ]; then return 2; fi
+	local destination=${2:-`LOG_ERROR "Wrong parameter: destination path" 1>&2; exit 2`}
+	if [ $? != 0 ]; then return 2; fi
+
+	# just in case create directory on destination
+	mkdir -p $destination &>>/dev/null
+	if [ ! -d "$destination" ]; then
+		LOG_ERROR "Cant find destination directory \"$destination\""
+		return 3
+	fi
+
+	# load backup config
+	unset NAME BLOCKDEV SUBVOL CHUNKSIZE PASSWORD DEST SUB_DIR COMPRESS
+	LOAD_CONFIG "$CONFIG/backup/$backup_name.conf"
+	[ $? == 0 ] || return 1
+
+	mkdir -p "$destination/$SUB_DIR" &>>/dev/null
+	if [ ! -d "$destination/$SUB_DIR" ]; then
+		LOG_ERROR "Cant find destination subdirectory \"$destination/$SUB_DIR\""
+		return 2
+	fi
+	local destination="$destination/$SUB_DIR"
+
+	# create file if does not exist
+	[ ! -f "$destination/$SHA1SUM_LOG" ] && touch $destination/$SHA1SUM_LOG
+	[ ! -f "$destination/$SIZE_LOG" ] && touch $destination/$SIZE_LOG
+
+	PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
+	[ $? == 0 ] || return 1
+	local backup_path="$WORK_BACKUP_PATH/$NAME"
+	unset WORK_SOURCE_PATH WORK_BACKUP_PATH
+	
+	# get backup filenames, files for send to server
+	local utsformat=$(cat $backup_path/$SHA1SUM_LOG 2>>/dev/null | awk -F " " '{print$2}')
+	local utsformat=$(CONVERT_FILENAME_TO_UNIX_TIMESTAMP_FILENAME "$utsformat" "$DATE_FORMAT")
+	# reverse list
+	local utsformat=$(echo -e "$utsformat" | sort -n -k1)
+
+	# convert to filenames
+	local tosendallchunks=$(CONVERT_UNIX_TIMESTAMP_FILENAME_TO_FILENAME "$utsformat" "$DATE_FORMAT")
+	local tosend=$(echo "$tosendallchunks" | sed 's/\.[^.]*$//' | uniq) # remove after last dot
+
+	local filename_old=""
+	local diff=""
+	local comment=""
+	for send in $tosend
+	do
+		# get parameters from filename
+		local directory=($(echo $send | sed -e 's/.inc/ inc/g' -e 's/.full/ full/g'))
+		directory=${directory[0]}
+
+		# get all filename chunks in local
+		local localchunks=$(echo "$tosendallchunks" | grep "$send")
+		# get all filename chunks in server
+		local remotechunks=$(grep "$send" $destination/$SHA1SUM_LOG | sed 's/^.* //g')
+
+		# get uniq to send
+		local chunks=$(echo -e "$localchunks\n$remotechunks\n\n" | sort | uniq -u)
+
+		# set conditions
+		local ifcond="[ true == false ] " # just in case
+		for i in $chunks
+		do
+			ifcond=$ifcond" || [ \"\$FILE\" == \"$i\" ]"
+		done
+
+		# concat cmd and filename
+		local cmd="(sudo btrfs send "
+		local cmd=$cmd" $backup_path/$directory"
+		if [[ "$send" == *'.inc.'* ]]; then
+			if [ "$filename_old" == "" ]; then
+				LOG_ERROR "Cant find last backup"
+			else
+				cmd=$cmd" -p \"$backup_path/$filename_old\" "
+			fi
+		fi
+		cmd=$cmd" 2>>/dev/null || echo -n 'btrfs ' 1>&3)"
+
+		# set old filename
+		filename_old="$directory"
+
+		# check gzip & encrypt
+		[[ "$send" != *'.gz'* ]] || cmd=$cmd" | (gzip -n || echo -n 'gz ' 1>&3)"
+		[[ "$send" != *'.enc'* ]] || cmd=$cmd"  | (openssl enc -e -K $PASSWORD -aes-256-cbc -iv 0 || echo -n 'enc ' 1>&3)"
+
+		local logcopy=""
+		logcopy=$logcopy" sed -n \"/\$FILE/p\" \"$backup_path/$SHA1SUM_LOG\" >> \"$destination/$SHA1SUM_LOG\" 2>>/dev/null;"
+		logcopy=$logcopy" sed -n \"/\$FILE/p\" \"$backup_path/$SIZE_LOG\" >> \"$destination/$SIZE_LOG\" 2>>/dev/null;"
+		
+		#[ "$STATUS" == "false" ] || cmd=$cmd" | (pv -p -t -e -s 500 -N '$send (chunks: $(($dlsize-1)))' || echo -n 'pv ' 1>&3)"
+		cmd=$cmd" | (split -a 4 -b $CHUNKSIZE -d --filter 'if $ifcond; then dd of=$destination/\"\$FILE\" 2>>/dev/null; $logcopy fi 2>>/dev/null' - $send"." || echo -n 'dd ' 1>&3)"
+
+		# check if backup exist (do not run command)
+		local dlsize=$(echo -e "$localchunks\n$remotechunks" | sed '/^$/d' | sort | uniq -u | wc -l)
+		if [ "$dlsize" == "0" ]; then
+			continue
+		fi
+
+		# send data (run command)
+		LOG_INFO "Copy backup '$send' (chunks: $dlsize)"
+		error=$(eval "$cmd" 3>&1)
+
+		# check errors
+		for err in $error
+		do
+			case $err in
+				dd)
+				LOG_ERROR "Can not copy data to location"
+				continue
+				;;
+				enc)
+				LOG_ERROR "Can not encrypt data"
+				continue
+				;;
+				gz)
+				LOG_ERROR "Can not compress"
+				continue
+				;;
+				btrfs)
+				LOG_ERROR "Can not read data"
+				continue
+				;;
+			esac
+		done
+
+		# update lines in log file
+		diff=$diff"\n"$(grep "$send" "$backup_path/$DIFF_LOG" 2>>/dev/null)
+		comment=$comment"\n"$(grep "$send" "$backup_path/$COMMENT_LOG" 2>>/dev/null)
+	done
+
+	# remove duplicate entry in SHA1SUM_LOG and SIZE_LOG
+	FILE_REMOVE_DOUBLE "$destination/$SHA1SUM_LOG"
+	FILE_REMOVE_DOUBLE "$destination/$SIZE_LOG"
+
+	# append diff files and remove duplicate
+	local tmpfile=$(tempfile)
+	DECODE_FILE "$destination/$DIFF_LOG" "$tmpfile" "$COMPRESS" "$PASSWORD"
+	echo -e "$diff" >> $tmpfile
+	FILE_REMOVE_DOUBLE "$tmpfile"
+	ENCODE_FILE "$destination/$DIFF_LOG" "$tmpfile" "$COMPRESS" "$PASSWORD"
+	rm $tmpfile
+
+	# append comment and remove duplicate
+	DECODE_FILE "$destination/$COMMENT_LOG" "$tmpfile" "$COMPRESS" "$PASSWORD"
+	echo -e "$comment" >> $tmpfile
+	FILE_REMOVE_DOUBLE "$tmpfile"
+	ENCODE_FILE "$destination/$COMMENT_LOG" "$tmpfile" "$COMPRESS" "$PASSWORD"
+	
+	rm "$tmpfile" &>>/dev/null
+	unset SRC PASSWORD DEST SUB_DIR COMPRESS
+	return 0
+	}
+
+function RECEIVEFROMDIR
+	{
+	# get & check arguments
+	local backup_name=${1:-`LOG_ERROR "Wrong parameter: backup name" 1>&2`}
+	[ "$backup_name" != "" ] || return 2
+	local destination=${2:-`LOG_ERROR "Wrong parameter: destination path" 1>&2`}
+	[ "$destination" != "" ] || return 2
+
+	# load backup config
+	LOAD_CONFIG "$CONFIG/backup/$backup_name.conf"
+	[ $? == 0 ] || return 2
+
+	# prepare working dir
+	PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
+	[ $? == 0 ] || return 1
+	local backup_path="$WORK_BACKUP_PATH/$NAME"	
+	unset WORK_SOURCE_PATH WORK_BACKUP_PATH
+
+	# check time
+	if [ ! -z "$TIME" ]; then
+		date -u -d "$TIME" &>>/dev/null
+		if [ $? != 0 ]; then
+			LOG_WARNING "Wrong date format '$TIME'"
+			return 1
+		fi
+		local printdate=$(date  -u -d "$TIME" '+%Y-%m-%d %H:%M:%S')
+		LOG_INFO "Get backup before date: $printdate"
+	else
+		TIME="now"
+	fi
+
+	# get time in past
+	local timestamp=$(date -u -d "$TIME" "+%s")
+	local currtimestamp=$(date -u -d "now" "+%s")
+
+	if (( $timestamp >= $currtimestamp )); then
+		LOG_WARNING "The input time is in the future not past (using last backup)"
+	fi
+
+	# check if control files is corrupt
+	local sha1sum_names=$(cat $destination/$SUB_DIR/$SHA1SUM_LOG 2>>/dev/null | awk -F " " '{print$2}')
+	local sizesum_names=$(cat $destination/$SUB_DIR/$SIZE_LOG 2>>/dev/null | awk -F " " '{print$1}')
+
+	local uniq=$(echo -e "$sha1sum_names\n$sizesum_names" | sort | uniq -u | wc -l)
+
+	if [ "$uniq" != "0" ]; then
+		LOG_ERROR "Control files (sha1sum or sizesum) corrupt"
+		return 1
+	fi
+
+	# add timeline, convert to unixtimestamp and sort
+	sha1sum_names=$sha1sum_names$'\n'
+	sha1sum_names=$sha1sum_names$(date -d "@$timestamp" "$DATE_FORMAT")".full.timeline"
+	local utsformat=$(CONVERT_FILENAME_TO_UNIX_TIMESTAMP_FILENAME "$sha1sum_names" "$DATE_FORMAT")
+
+	# list for download is between "full.timeline" and next full backup
+	local dl_list=$(echo "$utsformat" | sed -n '/full.timeline/,/full./p' | sed -e '/full.timeline/d')
+	# add other full chunks
+	local otherchunkname=$(echo "$dl_list" | grep 'full' | awk -F ' ' '{print$1}')
+	dl_list=$dl_list"\n"$(echo "$utsformat" | grep "^$otherchunkname")
+	
+	# replace last . with space and reverse sort list and remove doubles
+	dl_list=$(echo -e "$dl_list" | sed 's/\.\([^.]*\)$/ \1/' | sort -n -k1,3 | uniq)
+
+	if [ "$dl_list" == "" ]; then
+		LOG_ERROR "No backup for selected date ..."
+		return 2
+	fi
+
+	# replace last space with . (last space is for chunk sorting )
+	dl_list=$(echo -e "$dl_list" | sed 's/\ \([^ ]*\)$/.\1/')
+
+	# convert to filenames
+	dl_list=$(CONVERT_UNIX_TIMESTAMP_FILENAME_TO_FILENAME "$dl_list" "$DATE_FORMAT")
+
+	# prepare workdir
+	PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
+	[ $? == 0 ] || return 1
+	local backup_path="$WORK_BACKUP_PATH/$NAME"
+	local source_path=$WORK_SOURCE_PATH
+	unset WORK_SOURCE_PATH WORK_BACKUP_PATH
+	[ -d "$backup_path" ] || btrfs subvolume create "$backup_path" &>>/dev/null
+	
+	# check if file not exist
+	local i
+	for i in $dl_list
+	do
+		if [ ! -f "$destination/$SUB_DIR/$i" ]; then
+			LOG_ERROR "Backup file \"$i\" not exist ..."
+			return 2
+		fi
+	done
+
+	LOG_INFO "All backup files for restore exist!"
+
+	# get backups without chunks
+	local dl_list_short=$(echo "$dl_list" | sed 's/\.[^.]*$//' | uniq)
+
+	# decrypt comments and diffs
+	local comment_file=$(tempfile)
+	local diff_file=$(tempfile)
+	DECODE_FILE "$destination/$SUB_DIR/$DIFF_LOG" "$diff_file" "$COMPRESS" "$PASSWORD"
+	DECODE_FILE "$destination/$SUB_DIR/$COMMENT_LOG" "$comment_file" "$COMPRESS" "$PASSWORD"
+
+	counter=0
+	length=$(echo "$dl_list_short" | wc -l)
+	for i in $dl_list_short
+	do
+		((counter++))
+
+		# set directory name
+		local dirname=$(echo "$i" | sed -e 's/.inc/ inc/g' -e 's/.full/ full/g')
+		dirname=($dirname)
+		dirname=${dirname[0]}
+
+		# get all chunks
+		local chunks=$(echo "$dl_list" | grep "$i" | sed -e "s|^|$destination/$SUB_DIR/|g" -e 's/$//g')
+
+		local size=$(du -sbc $chunks | tail -n1 | awk '{print $1}')
+
+		chunks=$(echo "$chunks" | sed ':a;N;$!ba;s/\n/ /g')
+
+		local cmd="(cat $chunks 2>>/dev/null || echo -n 'dd ' 1>&3 ) "
+		[ "$STATUS" == "false" ] || cmd=$cmd"| (pv -p -t -e -s $size -N '$i ($counter/$length)' || echo -n 'pv ' 1>&3 ) "
+
+		[[ "$i" != *'.enc'* ]] || cmd=$cmd" | (openssl enc -d -K $PASSWORD -aes-256-cbc -iv 0 2>>/dev/null || echo -n 'enc ' 1>&3)"
+		[[ "$i" != *'.gz'* ]] || cmd=$cmd" | (gunzip 2>>/dev/null || echo -n 'gz ' 1>&3) "
+
+		cmd=$cmd" | (sudo btrfs receive \"$backup_path\" 2>>/dev/null || echo -n 'btrfs ' 1>&3)"
+
+		local error=""
+		if [ -d "$backup_path/$dirname" ]; then
+			LOG_WARNING "Directory '$dirname' ($counter/$length) with backup exist"
+		else
+			error=$(eval "$cmd" 3>&1)
+
+			if [ "$error" == "" ]; then
+				grep "$i" "$destination/$SUB_DIR/$SHA1SUM_LOG" 2>>/dev/null >> $backup_path/$SHA1SUM_LOG
+				grep "$i" "$destination/$SUB_DIR/$SIZE_LOG" 2>>/dev/null >> $backup_path/$SIZE_LOG
+				grep "$i" "$comment_file" 2>>/dev/null >> $backup_path/$COMMENT_LOG
+				grep "$i" "$diff_file" 2>>/dev/null >> $backup_path/$DIFF_LOG
+			fi
+		fi
+
+		# check errors
+		for err in $error
+		do
+			case $err in
+				dd)
+				LOG_ERROR "Cant get data from location"
+				return 2
+				;;
+				pv)
+				LOG_ERROR "Cant show process info"
+				return 2
+				;;
+				enc)
+				LOG_ERROR "Can not decrypt data"
+				return 2
+				;;
+				gz)
+				LOG_ERROR "Can not decompress"
+				return 2
+				;;
+				btrfs)
+				LOG_WARNING "Can not create restore (directory exist)"
+				;;
+			esac
+		done
+	done
+	# remove decrypt comments and diff file
+	rm $diff_file $comment_file
+
+	# remove double entry
+	FILE_REMOVE_DOUBLE "$backup_path/$SHA1SUM_LOG"
+	FILE_REMOVE_DOUBLE "$backup_path/$SIZE_LOG"
+
+	# create subvolume from last backup
+	if [ -d "$source_path" ]; then
+		LOG_WARNING "Can not create subvolume because subvolume exist"
+		local size=$(du -sh "$source_path" | awk '{print$1}')
+		PROMPT "Want you delete subvolume '$SUBVOL'? (size: $size)" 
+		[ $? == 0 ] || return 0
+	fi
+	sudo btrfs subvolume delete "$source_path" &>>/dev/null
+	sudo btrfs subvolume snapshot "$backup_path/$dirname" "$source_path" &>>/dev/null
+	if [ "$?" == "0" ]; then
+		LOG_INFO "Create new working subvolume '$SUBVOL'"
+	else
+		LOG_ERROR "Can not create new working subvolume '$SUBVOL'"
+	fi
+	}
+
+function PROMPT
+	{
+	# get & check arguments
+	local text=${1:-`LOG_ERROR "Wrong parameter: text" 1>&2`}
+	[ "$text" != "" ] || return 2
+	local default=${2:-"0"}
+
+	local yorn
+	local yorn_text
+	if [ "$default" == "Y" ] || [ "$default" == "y" ]; then
+		yorn="y"
+		yorn_text="(Y/n)"
+	elif [ "$default" == "N" ] || [ "$default" == "n" ]; then
+		yorn="n"
+		yorn_text="(y/N)"
+	elif [ "$default" == "0" ]; then
+		yorn="0"
+		yorn_text="(y/n)"
+	else
+		LOG_ERROR "Prompt bad input"
+		return 2
+	fi
+ 
+	while true;
+	do
+		echo -e "$text $yorn_text"
+		read -s -n1 var
+
+		if [ "$yorn" == "0" ];  then
+			if [[ "$var" == "Y" ]] || [[ "$var" == "y" ]]; then
+				return 0
+			elif [[ "$var" == "N" ]] || [[ "$var" == "n" ]]; then
+				return 1
+			fi
+		elif [ "$yorn" == "y" ];  then
+			if [[ "$var" == "Y" ]] || [[ "$var" == "y" ]] || [[ "$var" == "" ]]; then
+				return 0
+			elif [[ "$var" == "N" ]] || [[ "$var" == "n" ]]; then
+				return 1
+			fi
+		elif [ "$yorn" == "n" ];  then
+			if [[ "$var" == "Y" ]] || [[ "$var" == "y" ]]; then
+				return 0
+			elif [[ "$var" == "N" ]] || [[ "$var" == "n" ]] || [[ "$var" == "" ]]; then
+				return 1
+			fi
+		fi
+		echo -e "Unknown character, you must pres y or n"
+	done
+	}
+
+function DECODE_FILE
+	{
+	local src=${1:-`LOG_ERROR "Wrong parameter: src" 1>&2`}
+	local dest=${2:-`LOG_ERROR "Wrong parameter: dest" 1>&2`}
+	local compress=${3:-`LOG_ERROR "Wrong parameter: compress" 1>&2`}
+	local passsword=${4:-`LOG_ERROR "Wrong parameter: password" 1>&2`}
+
+	local cmd="cat '$src'"
+	[ "$password" != "" ] && cmd=$cmd" | openssl enc -d -K '$password' -aes-256-cbc -iv 0 2>>/dev/null "
+	[ "$compress" == "yes" ] && cmd=$cmd" | gzip -d 2>>/dev/null "
+	cmd=$cmd" | cat > '$dest'"
+	eval $cmd 2>>/dev/null
+	[ $? != 0 ] && LOG_ERROR "Can not decode file '$src'" && return 1
+	return 0
+	}
+
+function ENCODE_FILE
+	{
+	local dest=${1:-`LOG_ERROR "Wrong parameter: src" 1>&2`}
+	local src=${2:-`LOG_ERROR "Wrong parameter: dest" 1>&2`}
+	local compress=${3:-`LOG_ERROR "Wrong parameter: compress" 1>&2`}
+	local passsword=${4:-`LOG_ERROR "Wrong parameter: password" 1>&2`}
+
+	local cmd="cat '$src'"
+	[ "$compress" == "yes" ] && cmd=$cmd" | gzip 2>>/dev/null "
+	[ "$password" != "" ] && cmd=$cmd" | openssl enc -K '$password' -aes-256-cbc -iv 0 2>>/dev/null "
+	cmd=$cmd" | cat > '$dest'"
+	eval $cmd 2>>/dev/null
+	[ $? != 0 ] && LOG_ERROR "Can not encode file '$src'" && return 1
+	return 0
+	}
+
+function FILE_REMOVE_DOUBLE
+	{
+	local file=${1:-`LOG_ERROR "Wrong parameter: file" 1>&2`}
+
+	[ "$file" != "" ] || return 2
+	[ -f "$file" ] || return 2
+
+	local tmpfile=$(tempfile)
+	chmod 666 $tmpfile
+
+	# clear duplicate in log file
+	if [ -f "$file" ]; then
+		sort "$file" | uniq >> $tmpfile
+		mv "$tmpfile" "$file" 2>> /dev/null
+		if [ $? != 0 ]; then
+			LOG_WARNING "Can not move file: '$file'"
+			return 1
+		fi
+	fi
+
+	return 0
+	}
+
+# from greather to smaller
+function CONVERT_FILENAME_TO_UNIX_TIMESTAMP_FILENAME
+	{
+	local data=${1:-`LOG_ERROR "Wrong parameter: data" 1>&2`}
+	[ "$data" != "" ] || return 2
+	local format=${2:-`LOG_ERROR "Wrong parameter: format" 1>&2`}
+	[ "$format" != "" ] || return 2
+
+	# convert to Unix time stamp
+	for i in $data
+	do
+		[ -z "$output" ] ||  output=$output$'\n'
+		local separate=($(echo "$i" | sed -e 's/.inc./ inc./g' -e 's/.full./ full./g'))
+		#echo $format
+		local unixtimestamp=$(date -u -d "$(DATE_DEFORMAT "$format" "${separate[0]}")" "+%s")
+		output="$output$unixtimestamp ${separate[1]}"
+	done
+
+	# sort by
+	echo "$output" | sort -k1 -n -r
+	}
+
+function CONVERT_UNIX_TIMESTAMP_FILENAME_TO_FILENAME
+	{
+	local data=${1:-`LOG_ERROR "Wrong parameter: data" 1>&2`}
+	[ "$data" != "" ] || return 2
+	local format=${2:-`LOG_ERROR "Wrong parameter: format" 1>&2`}
+	[ "$format" != "" ] || return 2
+
+	# replace empty space with . (dot)
+	#data=$(echo "$data" | sed 's/ /./g')
+
+	#echo "$data"
+
+	local IFS=$'\n'
+	for i in $data
+	do
+		[ -z "$output" ] ||  output=$output$'\n'
+		local IFS=$' '
+		local separate=($i)
+		local time=$(date -u -d "@${separate[0]}" "$format")
+		output="$output$time.${separate[1]}"
+	done
+
+	echo "$output"
+	}
+
+# mount protocol from /protocol directory
+function MOUNT_PROTOCOL 
+	{
+	local server=${1:-`LOG_ERROR "Wrong parameter: server_name" 1>&2; return 2`}
+	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+
+	# remove old functions
+	unset MOUNT UMOUNT DEFAULT_CONFIG CHECK_PROGRAMS
+
+	# umount directory
+	sudo umount -l "$directory" &>>/dev/null
+
+	# load config file
+	source "$server" &>>/dev/null
+	if [ $? != 0 ]; then
+		LOG_ERROR "Bug in config $server"
+		return 2
+	fi
+
+	# load specific protocol
+	test -f /usr/share/btbckp/protocol/$PROTOCOL || source /usr/share/btbckp/protocols/$PROTOCOL
+	if [ $? != 0 ];  then
+		LOG_ERROR "protocol do not exist - check protocol directory" 1>&2
+		return 1
+	fi
+
+	# run checker
+	CHECK_PROGRAMS
+	if [ $? != 0 ];  then
+		unset MOUNT UMOUNT DEFAULT_CONFIG CHECK_PROGRAMS
+		LOG_ERROR "Check programs fail" 1>&2
+		return 1
+	fi
+
+	return 0
+	}
+
+# function 
+function CHECKSIZE
+	{
+	directory=${1:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+	for destination in `find $directory -type d 2>>/dev/null`
+	do
+		if [ -f "$destination/$SIZE_LOG" ]; then
+			cat $destination/$SIZE_LOG | while read line
+			do
+				filename=$(echo $line | awk -F ' ' '{print$1}')
+				size=$(echo $line | awk -F ' ' '{print$2}')
+
+				getsize=$(stat --printf="%s" "$destination/$filename" 2>>/dev/null)
+				if [ "$?" == "0" ]; then
+					if [ "$size" == "$getsize" ]; then
+						LOG_INFO "OK size filename: $filename ($size B)"
+					else
+						LOG_WARNING "FAIL size filename: $filename ($size/$getsize)"
+						if [ -z $DRYRUN ]; then
+							sudo rm "$destination/$filename" &>>/dev/null
+							sed -i "/$filename/d" $destination/$SIZE_LOG
+							sed -i "/$filename/d" $destination/$SHA1SUM_LOG
+							LOG_INFO "remove filename: $filename and remove file from log"
+						fi
+					fi
+				else
+					LOG_WARNING "FAIL filename: $filename does not exist"
+					if [ -z $DRYRUN ]; then
+						sed -i "/$filename/d" $destination/$SIZE_LOG
+						sed -i "/$filename/d" $destination/$SHA1SUM_LOG
+						LOG_INFO "remove filename: $filename from log"
+					fi
+				fi
+			done
+		fi
+	done
+	}
+
+function CHECKSUM
+	{
+	directory=${1:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+	for destination in `find "$directory" -type d 2>>/dev/null`
+	do
+		if [ -f "$destination/$SHA1SUM_LOG" ]; then
+			cat $destination/$SHA1SUM_LOG | while read line
+			do
+				filename=$(echo $line | awk -F ' ' '{print$2}')
+				sum=$(echo $line | awk -F ' ' '{print$1}')
+
+				getsum=$(sha1sum "$destination/$filename" 2>>/dev/null | awk '{print$1}')
+				if [ "$?" == "0" ]; then
+					if [ "$sum" == "$getsum" ]; then
+						LOG_INFO "OK checksum filename: $filename"
+					else
+						LOG_WARNING "FAIL checksum filename: $filename"
+						if [ -z $DRYRUN ]; then
+							sudo rm "$destination/$filename" &>>/dev/null
+							sed -i "/$filename/d" $destination/$SIZE_LOG
+							sed -i "/$filename/d" $destination/$SHA1SUM_LOG
+							LOG_INFO "remove filename: $filename and remove file from log"
+						fi
+					fi
+				else
+					LOG_WARNING "FAIL filename: $filename does not exist"
+					if [ -z $DRYRUN ]; then
+						sed -i "/$filename/d" $destination/$SIZE_LOG
+						sed -i "/$filename/d" $destination/$SHA1SUM_LOG
+						LOG_INFO "remove filename: $filename from log"
+					fi
+				fi
+			done
+		fi
+	done
+	}
+
+function CLEAN
+	{
+	local backup_name=${1:-`LOG_ERROR "Wrong parameter: backup name" 1>&2`}
+	[ "$backup_name" != "" ] || return 2
+	local destination=${2:-`LOG_ERROR "Wrong parameter: destination path" 1>&2`}
+	[ "$destination" != "" ] || return 2
+
+	# load backup config
+	LOAD_CONFIG "$CONFIG/backup/$backup_name.conf"
+	[ $? == 0 ] || return 2
+
+	# check time
+	if [ ! -z "$TIME" ]; then
+		date -u -d "$TIME" &>>/dev/null
+		if [ $? != 0 ]; then
+			LOG_WARNING "Wrong date format '$TIME'"
+			return 1
+		fi
+		local printdate=$(date  -u -d "$TIME" '+%Y-%m-%d %H:%M:%S')
+		LOG_INFO "Get backup before date: $printdate"
+	else
+		TIME="now"
+	fi
+
+	# get time in past
+	local timestamp=$(date -u -d "$TIME" "+%s")
+	local currtimestamp=$(date -u -d "now" "+%s")
+
+	if (( $timestamp >= $currtimestamp )); then
+		LOG_ERROR "The input time is in the future not past"
+		return 2
+	fi
+
+	# new destination
+	if [ $TYPE == "cleanlocal" ]; then
+		# prepare working dir
+		PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
+		[ $? == 0 ] || return 1
+		destination=$WORK_BACKUP_PATH/$NAME/
+	elif [ $TYPE == "cleanserver" ]; then
+		destination=$destination/$SUB_DIR
+	fi
+
+	# check if control files is corrupt
+	local sha1sum_names=$(cat $destination/$SHA1SUM_LOG 2>>/dev/null | awk -F " " '{print$2}')
+	local sizesum_names=$(cat $destination/$SIZE_LOG 2>>/dev/null | awk -F " " '{print$1}')
+
+	local uniq=$(echo -e "$sha1sum_names\n$sizesum_names" | sort | uniq -u | wc -l)
+
+	echo -e "$sha1sum_names\n$sizesum_names" | sort | uniq -u
+	if [ "$uniq" != "0" ]; then
+		LOG_ERROR "Control files (sha1sum or sizesum) corrupt"
+		return 2
+	fi
+
+	# add timeline, convert to unixtimestamp and sort
+	sha1sum_names=$sha1sum_names$'\n'
+	sha1sum_names=$sha1sum_names$(date -u -d "@$timestamp" "$DATE_FORMAT")".full.timeline"
+	utsformat=$(CONVERT_FILENAME_TO_UNIX_TIMESTAMP_FILENAME "$sha1sum_names" "$DATE_FORMAT")
+
+	# remove from list youger than "full.timeline" and "full.timeline"
+	dl_list=$(echo "$utsformat" | sed -n '/full.timeline/,//p' | sed -e '/full.timeline/d')
+
+	# find first full and remove all younger and itself
+	dl_list=$(echo "$dl_list" | sed -n '/full./,/^$/p' | sed -e '0,/full./{//d;}')
+
+	# reverse list
+	dl_list=$(echo -e "$dl_list" | sort -n -k1)
+
+	if [ "$dl_list" == "" ]; then
+		LOG_INFO "No backup for selected date ..."
+		return 2
+	fi
+
+	# BUG: 
+	if [ -z $DRYRUN ]; then
+		PROMPT "Want you really delete old local backups?"
+		[ $? == 0 ] || return 2
+	fi
+
+	# convert to filenames
+	dl_list=$(CONVERT_UNIX_TIMESTAMP_FILENAME_TO_FILENAME "$dl_list" "$DATE_FORMAT" | sed 's/\.[^.]*$//' | uniq)
+
+	for name in $dl_list
+	do
+		# parse directory name
+		dir=($(echo "$name" | sed -e 's/.full/ full/g' -e 's/.inc/ inc/g'))
+
+		LOG_INFO "Deleting backup '$name'..."
+
+		# delete subvolume
+		if [ -z $DRYRUN ]; then
+			if [ $TYPE == "cleanlocal" ]; then 
+				sudo btrfs subvolume delete "$WORK_BACKUP_PATH/$NAME/${dir[0]}" &>>/dev/null
+				[ $? == 0 ] || LOG_ERROR "Cant remove subvolume '${dir[0]}'"
+			elif [ $TYPE == "cleanserver" ]; then
+				rm $destination/$name* 
+			fi
+
+			# remove entry from log files
+			sed -i "/$name/d" $destination/$SHA1SUM_LOG
+			sed -i "/$name/d" $destination/$SIZE_LOG
+			sed -i "/$name/d" $destination/$DIFF_LOG
+			sed -i "/$name/d" $destination/$COMMENT_LOG
+		fi
+	done
+
+	return 0
+	}
+
+function PREPARE_WORKING_DIR
+	{
+	local blockdevice=${1:-`LOG_ERROR "Wrong parameter: blockdevice" 1>&2`}
+	local subvol=${2:-`LOG_ERROR "Wrong parameter: subvol" 1>&2`}
+
+	# check if block device or file exist exist
+	if [ ! -f "$blockdevice" ] && [ ! -b "$blockdevice" ]; then
+		LOG_ERROR "Device '$blockdevice' does not exist!"
+		return 1
+	fi
+
+	# create working directory if doenst exist
+	if [ ! -d "$WORKING_DIR" ]; then
+		LOG_INFO "Working dir '$WORKING_DIR' does not exist, create it..."
+		sudo mkdir -p "$WORKING_DIR"
+	fi
+
+	# get uuid of blockdevice
+	local uuid=$(blkid "$blockdevice" | awk -F "UUID=" '{print$2}' | awk -F '"' '{print$2}')
+	if [ $? != 0 ]; then
+		LOG_ERROR "Device '$blockdevice' have not UUID number!"
+		return 2
+	fi
+
+	# check type of FS
+	local btrfs=$(blkid "$blockdevice" | awk -F "TYPE=" '{print$2}' | awk -F '"' '{print$2}')
+	if [ "$btrfs" != "btrfs" ]; then
+		LOG_ERROR "Device '$blockdevice' is not btrfs filesystem!"
+		return 2
+	fi
+
+	# check if directory exist (and create it)
+	if [ ! -d "$WORKING_DIR/$uuid" ]; then
+		LOG_INFO "Working dir for mount point '$blockdevice' does not exist"
+		LOG_INFO "Create new directory for mount '$WORKING_DIR/$uuid'"
+		sudo mkdir -p "$WORKING_DIR/$uuid"
+	fi
+
+	# check if directory is mounted (if isnt mounted mount it)
+	if ! mountpoint -q "$WORKING_DIR/$uuid"; then
+		LOG_INFO "Mount '$blockdevice' on '$WORKING_DIR/$uuid'"
+		sudo mount "$blockdevice" "$WORKING_DIR/$uuid"
+	fi
+
+	# create global variables
+	WORK_SOURCE_PATH="$WORKING_DIR/$uuid/$subvol"
+	WORK_BACKUP_PATH="$WORKING_DIR/$uuid/$BTBCKP_ROOT_DIR"
+
+	if [ ! -d "$WORK_BACKUP_PATH" ]; then
+		LOG_INFO "Working dir for backup on '$WORKING_DIR/$uuid/' does not exist"
+		LOG_INFO "Create new directory for backup '$WORK_BACKUP_PATH'"
+		sudo btrfs subvolume create "$WORK_BACKUP_PATH" &>>/dev/null
+	fi
+
+	# check if subvolume exist
+	if [ ! -d "$WORK_SOURCE_PATH" ]; then
+		LOG_INFO "Working dir for source on '$WORKING_DIR/$uuid/' does not exist"
+		LOG_INFO "Create new directory for source '$WORK_SOURCE_PATH'"
+		sudo btrfs subvolume create "$WORK_SOURCE_PATH" &>>/dev/null
+	fi
+
+	#echo $WORK_SOURCE_PATH
+	#echo $WORK_BACKUP_PATH
+
+	return 0
+	}
+
+function LOAD_CONFIG
+	{
+	local config=${1:-`LOG_ERROR "Wrong parameter: config" 1>&2; return 2`}	
+	if [ ! -f "$config" ]; then
+		LOG_ERROR "Config file \"$config\" does not exit"
+		return 1
+	fi
+	source $config &>>/dev/null
+	if [ $? != 0 ]; then
+		LOG_ERROR "Config file \"$config\" have a bug"
+		return 2
+	fi
+	return 0
+	}
+
+function PARSE_DEST
+	{
+	local destinations=${1:-`LOG_ERROR "Wrong parameter: destinatins" 1>&2; return 2`}
+	echo "$destinations" | sed -e 's/ //g' -e 's/,/ /g' -e 's/;/ /g'
+	}
+
+function DATE_DEFORMAT
+	{
+	# get & check arguments
+	local format=${1:-`LOG_ERROR "Wrong parameter: format" 1>&2; exit 2`}
+	if [ $? != 0 ]; then return 2; fi
+	local time=${2:-`LOG_ERROR "Wrong parameter: time" 1>&2; exit 2`}
+
+	#format="+%F_%H-%M-%S"
+	#time="2016-09-16_22-51-36"
+
+	if [ ${format:0:1} != "+" ]; then
+		LOG_ERROR "Wrong parameter: format"
+		return 1
+	fi
+
+	local j=0
+	local i=0
+	local type=""
+	for ((i=1; i<${#format}; i++)); do
+		#echo ${format:$i:1}
+		case ${format:$i:1} in
+			%)
+				((i++))
+				((j++))
+				type[$j]="%"${format:$i:1}
+				((j++))
+				;;
+			*)
+				type[$j]=${type[$j]}${format:$i:1}
+		esac
+	done
+
+	# default values
+	local year="2016"
+	local month="01"
+	local day="01"
+
+	local hour="00"
+	local minutes="00"
+	local seconds="00"
+
+	local unixtimestamp=""
+
+	# add last character
+	time=$time" "
+
+	for ((i=0; i<${#type[@]}; i++)); do
+		[ "${type[$i]}" != "" ] || continue
+
+		case ${type[$i]} in
+			%%)
+			;;
+			
+			%a)
+			;;
+			
+			%A)
+			;;
+			
+			%b)
+			;;
+			
+			%B)
+			;;
+			
+			%c)
+			;;
+			
+			%C)
+			;;
+			
+			%d)
+			;;
+			
+			%D)
+			;;
+			
+			%e)
+			;;
+			
+			%F)
+			year=${time:0:4}
+			month=${time:5:2}
+			day=${time:8:2}
+			time=${time:10:-1}
+			time=$time" "
+			;;
+			
+			%g)
+			;;
+			
+			%G)
+			;;
+			
+			%h)
+			;;
+			
+			%H)
+			hour=${time:0:2}
+			time=${time:2:-1}
+			time=$time" "
+			;;
+			
+			%I)
+			;;
+			
+			%j)
+			;;
+			
+			%k)
+			;;
+			
+			%l)
+			;;
+			
+			%m)
+			;;
+			
+			%M)
+			minutes=${time:0:2}
+			time=${time:2:-1}
+			time=$time" "
+			;;
+			
+			%n)
+			;;
+			
+			%N)
+			;;
+			
+			%p)
+			;;
+			
+			%P)
+			;;
+			
+			%r)
+			;;
+			
+			%R)
+			;;
+			
+			%s)
+			year=""
+			month=""
+			day=""
+			hour=""
+			minutes=""
+			seconds=""
+			unixtimestamp="@"${time:0:-1}
+			time=$time" "
+			;;
+			
+			%S)
+			seconds=${time:0:2}
+			time=${time:2:-1}
+			time=$time" "
+			;;
+			
+			%t)
+			;;
+			
+			%T)
+			;;
+			
+			%u)
+			;;
+			
+			%U)
+			;;
+			
+			%V)
+			;;
+			
+			%w)
+			;;
+			
+			%W)
+			;;
+			
+			%x)
+			;;
+			
+			%X)
+			;;
+			
+			%y)
+			;;
+			
+			%Y)
+			;;
+			
+			%z)
+			;;
+			
+			%:z)
+			;;
+			
+			%::z)
+			;;
+			
+			%:::z)
+			;;
+			
+			%Z)
+			;;
+
+			*)
+			time=${time:${#type[$i]}:-1}
+			time=$time" "
+			;;
+
+		esac
+	done
+
+	if [ "$unixtimestamp" == "" ]; then
+		echo -n "$year-$month-$day $hour:$minutes:$seconds"
+	else
+		echo -n "$unixtimestamp"
+	fi
+	}
+
+#######################################
+# HELP text
+#######################################
+
+function HELP
+	{
+	local help="$1"
+	echo "
+		Btbckp is a CLI backup tool for BTRFS file system writing in Bash.
+		Version: $VERSION
+
+		Usage:
+		btbckp [type] {optional}
+		" | sed 's/^\t\t//g'
+
+	case $help in
+		"")
+		;&
+
+	full|inc)
+		echo "----------------------------------------------
+		Create backup:
+
+		btbckp full -b backupconfig
+			Create full 'backupconfig' backup (btrfs snapshot)
+		btbckp inc -b backupconfig
+			Create incremental 'backupconfig' backup (btrfs snapshot)
+
+		Optional arguments:
+			-c 'comment'	Set backup comment
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	send)
+		echo "----------------------------------------------
+		Send backup to server:
+
+		btbckp send -b backupconfig -s serverconfig
+			Send new 'backupconfig' backups to server 'serverconfig' ('serverconfig' must be defined in 'backupconfig')
+		btbckp send -b backupconfig
+			Send new 'backupconfig' backups to all servers defined in 'backupconfig'
+		btbckp send
+			Send all new backups to server
+
+		Optional arguments:
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+		
+	checksize)
+		echo "----------------------------------------------
+		Fast check and remove bad backups on servers (check file size):
+
+		btbckp checksize -b backupconfig -s serverconfig
+			Check and remove bad backup files in 'backupconfig' backup on server 'serverconfig'.
+		btbckp checksize -b backupconfig
+			Check backup files in 'backupconfig' backup on all servers
+
+		Optional arguments:
+			--dry-run	Just check, do not delete bad backups
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	checksum)
+		echo "----------------------------------------------
+		Check and remove bad backups on servers (full slow check - check checksum of file):
+
+		btbckp checksum -b backupconfig -s serverconfig
+			Check and remove bad backups in 'backupconfig' backup on server 'serverconfig'
+		btbckp checksum -b backupconfig
+			Check and remove bad backups in 'backupconfig' backup on all servers
+
+		Optional arguments:
+			--dry-run	Just check, do not delete bad backups
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	cleanlocal)
+		echo "----------------------------------------------
+		Clean local backups (increase local disk free space):
+
+		btbckp cleanlocal -b backupconfig -t '-10 days'
+			Delete older than 10 days from 'backupconfig' backup.
+
+		Optional arguments:
+			--dry-run	Just check, do not delete local backups
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	cleanserver)
+		echo "----------------------------------------------
+		Clean server backups (increase server disk free space):
+
+		btbckp cleanserver -b backupconfig -t '-10 days'
+			Delete older than 10 days from 'backupconfig' backup on all server
+		btbckp cleanserver -b backupconfig -s serverconfig -t '-10 days'
+			Delete older than 10 days from 'backupconfig' backup on server 'serverconfig'
+
+		Optional arguments:
+			--dry-run	Just check, do not delete local backups
+			-l 'logfile'	Print log into file (and stdout)
+			-e 'errorfile'	Print errors into file (and stdout)
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	backup)
+		echo "----------------------------------------------
+		Add/edit or delete backup configuration:
+			
+		btbckp backup add backupname
+			Create new backup configuration with name 'backupname'
+		btbckp backup edit backupname
+			Edit 'backupname' backup configuration
+		btbckp backup rm backupname
+			Delete 'backupname' backup configuration
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	server)
+		echo "----------------------------------------------
+		Add/edit or delete server configuration:
+			
+		btbckp server add servername -p serverprotocol
+			Create new server configuration with name 'servername' and protocol 'serverprotocol'
+		btbckp server edit servername
+			Edit 'servername' server configuration
+		btbckp server rm servername
+			Delete 'servername' server configuration
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	showlog)
+		echo "----------------------------------------------
+		Show status and errors:
+
+		btbckp showlog 'logname'
+			Print log for flags '-e' and '-l'.
+		Optional arguments:
+			-n	Print last n log lines and wait for new logs
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+	
+	save)
+		echo "----------------------------------------------
+		Save btbckp configuration:
+
+		btbckp save filename
+			Save configuration in file 'filename'
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+	
+	install)
+		echo "----------------------------------------------
+		Install btbckp on your system
+
+		btbckp install
+			Install btbckp on your system.
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+	
+	uninstall)
+		echo "----------------------------------------------
+		Uninstall btbckp on your system
+
+		btbckp uninstall
+			Uninstall btbckp on your system.
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	restore)
+		echo "----------------------------------------------
+		Restore backup on your system
+
+		btbckp restore -b backupname
+			Restore last chain of backups with config 'backupname' from first server
+		btbckp restore -b backupname -s servername
+			Restore last chain of backups with config 'backupname' from server config 'servername'
+		btbckp restore -b backupname -s servername -t '-10 days'
+			Restore last 10 days chain of backups with config 'backupname' from server config 'servername'
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0
+		;&
+
+	other)
+		echo "----------------------------------------------
+		Print help
+
+		btbckp -h
+			Print all help
+		btbckp inc -h
+			Print help for backup
+		btbckp send -h
+			Print help for send
+
+		----------------------------------------------
+		Print version:
+
+		btbckp -V
+			Print version
+		" | sed 's/^\t\t//g'
+		[ "$help" != "" ] && return 0	
+
+	esac
+
+	return 0
+	}
+
+#######################################
+# check arguments and set default values
+#######################################
+function CHECK_ARGUMENTS
+	{
+	# check and print help
+	[ "$PRINT_HELP" != "" ] && HELP "$TYPE" && exit 0
+	# check and print versions
+	[ "$PRINT_VERSION" != "" ] && echo "Version: $VERSION" && exit 0
+
+	# check user if is root
+	[ "$(id -u)" != "0" ] && LOG_ERROR "Run program as root (sudo)" && exit 3
+
+
+	# check type if exist
+	[ "$TYPE" == "" ] && LOG_ERROR "Master parameter not exist (see help: btbckp -h)" && exit 3
+
+	# full and inc type
+	if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
+		[ "$BACKUP_NAME" == "" ] && LOG_ERROR "Required backup name parameter not exist (parameter: -b)" && exit 1
+		if [ "$DRYRUN" != "" ]; then
+			PROMPT "Dry-run feature not exist for this command, you want to continue?" "N" || exit 3
+		fi
+	# send type
+	elif [ "$TYPE" == 'send' ]; then
+		:
+	# checksum and checksize
+	elif [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checksum' ]; then
+		if [ "$BACKUP_NAME" == "" ]; then
+			LOG_WARNING "Backup name is not known (parameter: -b)"
+			PROMPT "Do you want to calculate checksizes for all backups?" "N" || exit 2
+		fi
+		if [ "$SERVER_NAME" == "" ]; then
+			LOG_WARNING "Server name is not known (parameter: -s)"
+			PROMPT "Do you want to calculate all checksizes for all servers?" "N" || exit 2
+		fi
+	# restore
+	elif [ "$TYPE" == 'restore' ]; then
+		[ "$BACKUP_NAME" == "" ] && LOG_ERROR "Backup name parameter does not exist (parameter: -b)" && exit 1
+		if [ "$SERVER_NAME" == "" ]; then
+			PROMPT "Do you want to download backup for first server?" "N" || exit 2
+		fi
+	# clean local
+	elif [ "$TYPE" == 'cleanlocal' ]; then
+		[ "$BACKUP_NAME" == "" ] && LOG_ERROR "Backup name parameter does not exist (parameter: -b)" && exit 1
+		[ "$TIME" == "" ] && LOG_ERROR "Time parameter do not exist (parameter: -t)" &&	exit 1
+	# clean server
+	elif [ "$TYPE" == 'cleanserver' ]; then
+		[ "$BACKUP_NAME" == "" ] && LOG_ERROR "Backup name parameter does not exist (parameter: -b)" && exit 1
+		if [ "$SERVER_NAME" == "" ]; then
+			LOG_WARNING "Server name is not known (parameter: -s)"
+			PROMPT "Do you want to remove backup for all servers?" "N" || exit 1
+		fi
+		[ "$TIME" == "" ] && LOG_ERROR "Time parameter do not exist (parameter: -t)" &&	exit 1
+	elif [ "$TYPE" == 'install' ] || [ "$TYPE" == 'uninstall' ]; then
+		:
+	# showlog
+	elif [ "$TYPE" == 'showlog' ]; then
+		[ "$SECTYPE" == "" ] && LOG_ERROR "Filename argument does not exist!" && exit 1
+	# save
+	elif [ "$TYPE" == 'save' ]; then
+		[ "$SECTYPE" == "" ] && LOG_ERROR "Filename argument does not exist!" && exit 1
+
+	# server and backup configuration
+	elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
+		[ "$SECTYPE" == "" ] && LOG_ERROR "Type argument does not exist!" && exit 1
+		[ "$SECTYPE" != "list" ] && [ "$TERTYPE" == "" ] && LOG_ERROR "Configuration argument does not exist!" && exit 1
+		if [ "$SECTYPE" != "list" ] && [ "$SECTYPE" != "add" ] && [ "$SECTYPE" != "edit" ] && [ "$SECTYPE" != "rm" ]; then
+			LOG_ERROR "Wrong argument '$SECTYPE' (use: list, add, edit or rm)"
+			exit 1
+		fi
+		if [ "$TYPE" == 'server' ] && [ "$PROTOCOL" == "" ] && [ "$SECTYPE" == "add" ]; then
+			LOG_ERROR "Configuration protocol does not exist! (use argument: -p)"
+			exit 1
+		fi
+	fi
+
+	# default parameters
+	[ "$COMMENT" == "" ] && COMMENT='-' # default comment (arg -c)
+	[ "$STATUS" == "" ]  && STATUS=true # default status bar (inverse arg --no-status)
+	[ "$NUMBER" == "" ]  && NUMBER=10 # default number (arg -n)
+	}
+
+CHECK_ARGUMENTS
+
+#######################################
+# type FULL && INC
+#######################################
+if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
+	# import backup config
+	LOAD_CONFIG "$CONFIG/backup/$BACKUP_NAME.conf"
+	[ $? == 0 ] || exit 2
+
+	# create snapshot names and paths
+	PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
+	[ $? == 0 ] || exit 3
+
+	snapshot=$(date -u $DATE_FORMAT)
+	backuppath="$WORK_BACKUP_PATH/$NAME"
+	snapshotdir="$backuppath/$snapshot"
+	sourcedir=$WORK_SOURCE_PATH
+	unset WORK_BACKUP_PATH WORK_SOURCE_PATH
+
+	LOG_INFO "Start create $TYPE backup on '$BACKUP_NAME' ($COMMENT) "
+
+	# check if snapshotdir exist (backup directory - where are stored all backup snapshot)
+	if [ ! -d "$backuppath" ]; then
+		LOG_WARNING "Snapshots directory does not exist..."
+		sudo btrfs subvolume create "$backuppath" &>> /dev/null
+		if [ $? == 0 ]; then
+			LOG_INFO "Create new snapshot '$backuppath'"
+			sudo touch "$backuppath/$SHA1SUM_LOG" "$backuppath/$SIZE_LOG" "$backuppath/$DIFF_LOG" "$backuppath/$COMMENT_LOG"
+			sudo chmod 777 $backuppath/*
+		else
+			LOG_ERROR "Can not create snapshot subvolume (directory) at \"$backuppath\""
+			exit 1
+		fi
+	fi
+
+	# check last backup for incremental backup
+	if [ "$TYPE" == 'inc' ]; then
+		# get all backups
+		sha1sum_names=$(cat $backuppath/$SHA1SUM_LOG 2>>/dev/null | awk -F " " '{print$2}')
+
+		if [ "$sha1sum_names" == "" ]; then
+			LOG_ERROR "Last inc or full backup do not exist (use full backup)"
+			exit 2
+		fi
+
+		# sort and get last backup
+		utsformat=$(CONVERT_FILENAME_TO_UNIX_TIMESTAMP_FILENAME "$sha1sum_names" "$DATE_FORMAT" | head -n1)
+		utsformat=$(CONVERT_UNIX_TIMESTAMP_FILENAME_TO_FILENAME "$utsformat" "$DATE_FORMAT")
+		dirname=($(echo "$utsformat" | sed -e 's/.inc/ inc/g' -e 's/.full/ full/g'))
+		last="$backuppath/${dirname[0]}"
+
+		# check if last backup exist
+		if [ ! -d "$last" ]; then
+			LOG_ERROR "Cant find last inc or full backup path"
+			exit 1
+		fi
+	fi
+
+	# create readonly snapshot
+	sudo btrfs subvolume snapshot -r "$sourcedir" "$snapshotdir" &>> /dev/null
+	if [ $? == 0 ]; then
+		# concat cmd and filename
+		cmd="sudo btrfs send"
+		filename=$snapshot
+		# increment or full backup name
+		if [ "$TYPE" == 'full' ]; then
+			cmd=$cmd" \"$snapshotdir\" | "
+			filename=$filename".full"
+		else
+			cmd=$cmd" \"$snapshotdir\" -p \"$last\" | "
+			filename=$filename".inc"
+		fi
+		# add btrfs
+		filename=$filename".btrfs"
+		# enable compress 
+		if [ ! -z "$COMPRESS" ]; then
+			cmd=$cmd" gzip -n | "
+			filename=$filename".gz"
+		fi
+		# enable crypt
+		if [ ! -z "$PASSWORD" ]; then
+			cmd=$cmd"openssl enc -e -K $PASSWORD -aes-256-cbc -iv 0 | "
+			filename=$filename".enc"
+		fi
+
+		cmd=$cmd" split -a 4 -b $CHUNKSIZE -d --filter 'tee >(sha1sum | sed \"s/  -/  \$FILE/g\" >> $backuppath/$SHA1SUM_LOG) >({  echo -n \"\$FILE \"; wc -c; } >> $backuppath/$SIZE_LOG) >> /dev/null;' - $filename."
+
+		# create sha1sum and size log (run command)
+		eval $cmd &>> /dev/null
+		
+		# update diff files
+		if [ "$TYPE" == 'inc' ]; then
+			old_transid=`sudo btrfs subvolume find-new "$last" 9999999999`
+			old_transid=${old_transid#transid marker was }
+		elif [ "$TYPE" == 'full' ]; then
+			old_transid="0"
+		fi
+
+		# add diff to file
+		sudo btrfs subvolume find-new "$snapshotdir" $old_transid | sed '$d' |  cut -f17- -d' ' | sort | uniq | sed "s/^/$filename /g" 2>>/dev/null >> "$backuppath/$DIFF_LOG"
+
+		# print comment
+		echo "$filename $COMMENT" >> $backuppath/$COMMENT_LOG
+
+		LOG_INFO "Successfully create backup '$BACKUP_NAME' '$filename'"
+	else
+		LOG_WARNING "Can not create backup!"
+	fi
+
+#######################################
+# type SEND, CHECKSIZE, CHECKSUM, RESTORE, CLEANSERVER
+#######################################
+elif [ "$TYPE" == 'send' ] || [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checksum' ] || [ "$TYPE" == 'restore' ] || [ "$TYPE" == 'cleanserver' ]; then
+	# set if server name argument is avalible
+	server_dir="$CONFIG/server/"
+	[  -z "$SERVER_NAME" ] || server_dir="$server_dir/$SERVER_NAME.conf"
+
+	# search for all avalible servers or name server argument
+	for server in `find "$server_dir" -name "*.conf" -printf "server/%f\n" 2>> /dev/null`
+	do
+		# create mount directory
+		mountdir="$WORKING_DIR/$BTBCKP_SERVER_DIR/$basename/"$(basename "$server")"/"
+		sudo mkdir -p $mountdir &>>/dev/null
+
+		# load mount protocol
+		MOUNT_PROTOCOL "$CONFIG/$server" "$mountdir"
+		[ $? == 0 ] || continue
+
+		# execute mount
+		MOUNT "$CONFIG/$server" "$mountdir"
+		[ $? == 0 ] ||	continue
+
+		# include backup configs
+		# set if backup name argument is avalible
+		backup_dir="$CONFIG/backup/"
+		[ -z "$BACKUP_NAME" ] || backup_dir="$backup_dir/$BACKUP_NAME.conf"
+
+		# search for all avalible backups or name backup argument
+		for backup in `find "$backup_dir" -name "*.conf" -printf "backup/%f\n" 2>> /dev/null`
+		do
+			unset NAME BLOCKDEV SUBVOL PASSWORD DEST SUB_DIR COMPRESS
+			# load new values
+			LOAD_CONFIG "$CONFIG/$backup"
+			[ $? == 0 ] || continue
+
+			# parse backup destination
+			for destination in $(PARSE_DEST "$DEST")
+			do
+				destination_path="$CONFIG/server/$destination.conf"
+				backup_basename=(${backup//\// })
+				backup_basename=${backup_basename[-1]/.conf/}
+
+				if [ "$destination_path" -ef "$CONFIG/$server" ]; then
+					if [ "$TYPE" == 'checksize' ]; then 
+						# check size
+						CHECKSIZE "$MOUNTPATH/$backup_basename"
+					elif [ "$TYPE" == 'checksum' ]; then
+						# check sum
+						CHECKSUM "$MOUNTPATH/$backup_basename"
+					elif [ "$TYPE" == 'send' ] ; then
+						# send backup to server destination
+						SENDTODIR "$backup_basename" "$MOUNTPATH"
+					elif [ "$TYPE" == 'restore' ] ; then
+						RECEIVEFROMDIR "$backup_basename" "$MOUNTPATH"
+					elif [ "$TYPE" == 'cleanserver' ] ; then
+						CLEAN "$backup_basename" "$MOUNTPATH"
+					fi
+				fi
+			done
+		done
+		# umount storage
+		UMOUNT "$CONFIG/$server" "$mountdir"
+	done
+
+#######################################
+# type CLEANLOCAL
+#######################################
+elif [ "$TYPE" == 'cleanlocal' ]; then
+	CLEAN "$BACKUP_NAME" "/"
+#######################################
+# type SHOWLOG
+#######################################
+elif [ "$TYPE" == 'showlog' ]; then
+	[ -f $LOG_DIR/$SECTYPE ] || LOG_ERROR "Log file '$SECTYPE' does not exist"
+	[ -f $LOG_DIR/$SECTYPE ] || exit 2
+	tail -f -n $NUMBER $LOG_DIR/$SECTYPE | sed -e 's/^/\o033[38;5;17m/' -e "s/INFO:/\o033[0m\o033[38;5;22mINFO:\o033[0m/" -e "s/WARNING:/\o033[0m\o033[38;5;3mWARNING:\o033[0m/" -e "s/ERROR:/\o033[0m\o033[38;5;1mERROR:\o033[0m/"
+#######################################
+# type INSTALL
+#######################################
+elif [ "$TYPE" == 'install' ]; then
+	source "config.conf" &>>/dev/null
+	if [ $? != 0 ]; then
+		test -f "config.conf" || echo "ERROR: config file do not exist" 1>&2; exit 2
+		echo "ERROR: config file have a bug" 1>&2
+		exit 2
+	fi
+	# check if program exist
+	if [ -f /usr/bin/btbckp ] && [ -d /etc/btbckp ]; then
+		LOG_WARNING "Program btbckp exist" 1>&2
+		PROMPT "Want you reinstall btbckp?" "Y" || exit 2
+	fi
+
+	# copy program
+	cp btbckp /usr/bin/
+	# copy config files
+	mkdir -p $CONFIG
+	cp -r server $CONFIG
+	cp -r backup $CONFIG
+	cp config.conf $CONFIG
+	# copy protocols
+	mkdir -p /usr/share/btbckp
+	cp -r protocols /usr/share/btbckp/
+	# create log dir
+	mkdir -p $LOG_DIR
+
+	# check dependency
+	for file in $(find /usr/share/btbckp/protocols/)
+	do
+		source "$file" &>>/dev/null
+		[ $? == 0 ] || continue
+		CHECK_PROGRAMS
+		[ $? == 0 ] || LOG_WARNING "Dependency problem with protocol $(basename $file)"
+	done
+	LOG_INFO "Btbckp successfully install on your system!"
+
+#######################################
+# type UNINSTALL
+#######################################
+elif [ "$TYPE" == 'uninstall' ]; then
+	PROMPT "You really want to remove btbckp?" "N" || exit 2
+
+	# remove program
+	rm /usr/bin/btbckp &>>/dev/null
+	# remove working dir
+	sudo umount -l /var/btbckp/* &>>/dev/null
+	rm -rf /var/btbckp
+	# remove protocols
+	rm -r /usr/share/btbckp &>>/dev/null
+	#remove log
+	rm -r $LOG_DIR &>>/dev/null
+	PROMPT "You really want to remove btbckp configuration files?" "N"
+	if [ $? == 0 ]; then
+		rm -r $CONFIG &>>/dev/null
+	fi
+
+	LOG_INFO "Successfully remove btbckp!"
+
+#######################################
+# type SAVE
+#######################################
+elif [ "$TYPE" == 'save' ]; then
+	# check if file exist
+	[ ! -f $SECTYPE.tgz* ] 2>>/dev/null || PROMPT "File $SECTYPE exist - do yo want remove it?" "N" || exit 2
+
+	# create tmp file
+	tmpfile=$(tempfile -s ".tar")
+
+	# add configs
+	tar cf $tmpfile -C "$CONFIG/" config.conf server backup &>>/dev/null
+	[ $? == 0 ] || LOG_WARNING "Can not save configs"
+	# add protocols
+	tar rf $tmpfile -C "/usr/share/btbckp" protocols
+	[ $? == 0 ] || LOG_WARNING "Can not save protocols"
+	# add program
+	tar rf $tmpfile -C "/usr/bin" btbckp &>>/dev/null
+	[ $? == 0 ] || LOG_WARNING "Can not save program"
+
+	# create from tar to tar.gz
+	gzip $tmpfile
+
+	PROMPT "Want you crypt archive" "Y"
+	if [ $? == 0 ]; then
+		while true; do
+			openssl enc -aes-256-cbc -in $tmpfile.gz -out $SECTYPE.tgz.aes256cbc
+			[ $? != 0 ] || break
+		done
+		rm $tmpfile.gz
+		LOG_INFO "Successfully create crypted (aes-256-cbc) archive of btbckp ($SECTYPE.tgz.aes256cbc)"
+		LOG_WARNING "Do not forget your password"
+		LOG_INFO "Install from backup: decrypt ('openssl enc -d -aes-256-cbc -in $SECTYPE.tgz.aes256cbc -out $SECTYPE.tgz'), decompress ('tar f $SECTYPE.tar') and install (sudo ./btbckp install)"
+	else
+		mv $tmpfile.gz $SECTYPE.tgz
+		LOG_INFO "Successfully create archive of btbckp ($SECTYPE.tgz)"
+		LOG_WARNING "Be careful - the archive can include backup passwords or remote servers access."
+		LOG_INFO "Install from backup: decompress ('tar f $SECTYPE.tar') and install (sudo ./btbckp install)"
+	fi
+
+#######################################
+# type BACKUP
+#######################################
+elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
+	# dirname
+	[ "$TYPE" == 'backup' ] && dirname="backup"
+	[ "$TYPE" == 'server' ] && dirname="server"
+
+	# remove configuration from system
+	if [ "$SECTYPE" == "rm" ]; then
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' does not exist (can not remove it)"
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+		PROMPT "Do you really want to delete $dirname config file $SECTYPE" "N"
+		[ $? == 0 ] || exit 0
+		rm $CONFIG/$dirname/$TERTYPE.conf
+		LOG_INFO "Config file '$TERTYPE' successfully delete from system"
+	
+	# add new configuration
+	elif [ "$SECTYPE" == "add" ]; then
+		# check if file exist
+		[ ! -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' exist (can not create new)"
+		[ ! -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+
+		[ "$TYPE" == 'backup' ] && echo "
+		# Backup configuration with name '$TERTYPE'
+		# Comments are begins with '#'
+		# Coding type is bash
+
+		# Name of backup directory (can be the same as configuration name)
+		NAME=$TERTYPE
+
+		# Block device with btrfs
+		BLOCKDEV=/dev/sda1
+
+		# name or path of btrfs subvolume (which you use for backup)
+		SUBVOL=root
+
+		# Split big file on chunk size, when you send data to server
+		CHUNKSIZE=10M
+
+		# set HEX password for crypted backup
+		# file will be crypted with AES256CBC (init seed 0)
+		# if you do not want use encryption just comment line
+		# the password is random value generated with command: openssl rand -hex 32
+		PASSWORD=$(openssl rand -hex 32)
+
+		# name of servers destination for remote backup storage
+		# servers must be separated with comma (,)
+		DEST=$(find $CONFIG/server -name "*.conf" -printf ",%f" | sed  -e 's/\.conf//g' -e 's/^,//g' )
+
+		# sub directory on server which will be saved backups
+		SUB_DIR=root
+
+		# use gzip compression
+		# if you do not want use compression just comment line
+		COMPRESS=yes
+		" | sed -e 's/^[ \t]*//' > $CONFIG/$dirname/$TERTYPE.conf
+
+		if [ "$TYPE" == 'server' ]; then
+			source /usr/share/btbckp/protocols/$PROTOCOL &>> /dev/null
+			[ $? != 0 ] && LOG_ERROR "Protocol '$PROTOCOL' does not exist, cant create server configuration" && exit 2
+			DEFAULT_CONFIG "$TERTYPE" > $CONFIG/$dirname/$TERTYPE.conf
+		fi
+
+	# check if file exist
+	elif [ "$SECTYPE" == "edit" ]; then
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' does not exist (can not edit it)"
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+	elif [ "$SECTYPE" == "list" ]; then
+		LOG_INFO "Avalible $dirname configs: $(find $CONFIG/$dirname -type f -printf '%f, ' | sed -e 's/\.conf//g' -e 's/, $//g')"
+	fi
+
+	if [ "$SECTYPE" == "add" ] || [ "$SECTYPE" == "edit" ]; then
+		# create tmpfile remove and create link with .sh suffix (colors in editor)
+		tmpfile=$(tempfile -s ".sh")
+		rm $tmpfile
+		ln -s $CONFIG/$dirname/$TERTYPE.conf $tmpfile
+		$EDITOR $tmpfile
+		rm $tmpfile
+	fi
+	# add additional comments in config
+	if [ "$SECTYPE" == "add" ] && [ "$TYPE" == 'backup' ]; then
+		sed -i -e 's/NAME=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nNAME=/g' $CONFIG/backup/$TERTYPE.conf
+		sed -i -e 's/SUBVOL=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nSUBVOL=/g' $CONFIG/backup/$TERTYPE.conf
+		sed -i -e 's/CHUNKSIZE=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nCHUNKSIZE=/g' $CONFIG/backup/$TERTYPE.conf
+		sed -i -e 's/PASSWORD=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nPASSWORD=/g' $CONFIG/backup/$TERTYPE.conf
+		sed -i -e 's/SUBDIR=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nSUB_DIR=/g' $CONFIG/backup/$TERTYPE.conf
+		sed -i -e 's/COMPRESS=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nCOMPRESS=/g' $CONFIG/backup/$TERTYPE.conf
+	fi
+
+fi
+
+
+
+
+
+

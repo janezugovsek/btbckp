@@ -1,0 +1,97 @@
+function DEFAULT_CONFIG
+	{
+	local conf_name=${1:-"Unknown"}
+	echo "
+	# Server configuration '$conf_name' for protocol 'sshfs'
+	# Comments are begins with '#'
+	# Coding type is bash
+
+	# Type of protocol (do not change!)
+	PROTOCOL=sshfs
+
+	# server address hostname
+	ADDR=localhost
+
+	# ssh server port
+	PORT=22
+	
+	# ssh server username
+	USER=user
+
+	# directory on server where will be saved backups
+	DIR=backup/
+
+	# Optional config: SSH identify
+	# path to the RSA certificate
+	# uncomment line and add certificate on location
+	# IDENTIFY=$CONFIG/server/sshfs/$conf_name.idrsa
+	" | sed -e 's/^[ \t]*//'
+}
+
+function CHECK_PROGRAMS
+	{
+	local error=false
+	which sshfs &>>/dev/null
+	if [ $? != 0 ]; then
+		LOG_WARNING "Check: sshfs does not exist on computer!" 1>&2
+		error=true
+	fi
+
+	[ "$error" != "true" ] || return 1
+	return 0
+	}
+
+function MOUNT
+	{
+	# check argument parameter
+	local server=${1:-`LOG_ERROR "Wrong parameter: server_name" 1>&2; return 2`}
+	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+
+
+	local options=""
+	# set options
+	if [ "$IDENTIFY" != "" ]; then
+		options="-o "
+	fi
+
+	if [ "$IDENTIFY" != "" ]; then
+		options=$options"IdentityFile=\"$IDENTIFY\","
+	fi
+
+	# remove last comma
+	options=$(echo $options | sed 's/,$//g')
+
+	sshfs -p "$PORT" $options "$USER@$ADDR:" "$directory" 
+	if [ $? != 0 ]; then
+		LOG_ERROR "Protocol 'sshfs' can not connect to server"
+		unset USER ADDR
+		return 1
+	fi
+	unset USER ADDR IDENTIFY
+
+
+	MOUNTPATH="$directory"/$DIR
+	mkdir -p $MOUNTPATH 2>>/dev/null
+	if [ $? != 0 ]; then
+		LOG_ERROR "'sshfs' can not create directory '$MOUNTPATH'"
+		unset USER ADDR
+		return 1
+	fi
+
+	LOG_INFO "Connect 'sshfs' with server '"$(basename "$server" | sed 's/\.conf//g')"'"
+
+	return 0
+	}
+
+function UMOUNT
+	{
+	# check argument parameter
+	local server=${1:-`LOG_ERROR "Wrong parameter: server_name" 1>&2; return 2`}
+	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
+
+	sudo umount "$directory" &>>/dev/null
+
+	LOG_INFO "Unconnect 'sshfs' with server '"$(basename "$server" | sed 's/\.conf//g')"'"
+
+	return 0
+	}
