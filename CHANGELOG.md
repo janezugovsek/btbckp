@@ -1,3 +1,15 @@
+## v1.0-rc2
+### New features
+ - More help for sshfs (how create identity file)
+ - Multiple runs program (wait for PID)
+ - Add -y (yes) parameter for checksum and checksize
+ - Add connection timeout for sshfs protocol
+ - Add protocol cifs (Windows, SAMBA)
+ - Add connection timeout
+
+### Bugfix
+ - umount after connection down
+ - saving data into unmounted storage
 
 ## v1.0-rc1
 ### New features

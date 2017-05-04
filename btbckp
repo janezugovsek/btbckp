@@ -2,7 +2,8 @@
 
 DEFAULT_CONFIG='/etc/btbckp/' # default config directory
 DATE_FORMAT="+%F_%H-%M-%S"
-VERSION="v1.0-rc1"
+VERSION="v1.0-rc2"
+PROGRAM_PID=$$
 
 #######################################
 # argument parser and help printing
@@ -174,6 +175,10 @@ while (( $# >= 1 ))
 		-V|--version)
 			PRINT_VERSION="version"
 			;;
+
+		-y|--yes)
+			YES=true
+			;;
 		*)
 		echo "Unknown option: '$key'" 1>&2
 		exit 2
@@ -202,7 +207,7 @@ fi
 # LOGING FUNCTIONS
 #######################################
 # create time sign
-timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
+#timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
 
 # change log filenames
 [ "$LOGSTATUSFILE" != "" ] && STATUS_LOG=$LOG_DIR/$LOGSTATUSFILE
@@ -210,12 +215,14 @@ timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
 
 function LOG_INFO
 	{
+	local timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
 	echo -e "\e[38;5;22mINFO:\e[0m $@"
 	echo -e "$timesign INFO: $@" >> "$STATUS_LOG"
 	}
 
 function LOG_ERROR
 	{
+	local timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
 	echo -e "\e[38;5;1mERROR:\e[0m $@" 1>&2
 	echo -e "$timesign ERROR: $@" >> "$ERROR_LOG"
 	echo -e "$timesign ERROR: $@" >> "$STATUS_LOG"
@@ -223,6 +230,7 @@ function LOG_ERROR
 
 function LOG_WARNING
 	{
+	local timesign=`date -u "+[%d.%m.%Y %H:%M:%S %Z]"`
 	echo -e "\e[38;5;3mWARNING:\e[0m $@" 1>&2
 	echo -e "$timesign WARNING: $@" >> "$ERROR_LOG"
 	echo -e "$timesign WARNING: $@" >> "$STATUS_LOG"
@@ -305,7 +313,7 @@ function SENDTODIR
 		local cmd=$cmd" $backup_path/$directory"
 		if [[ "$send" == *'.inc.'* ]]; then
 			if [ "$filename_old" == "" ]; then
-				LOG_ERROR "Cant find last backup"
+				LOG_ERROR "Cant find last backup (configuration: '$backup_name')"
 			else
 				cmd=$cmd" -p \"$backup_path/$filename_old\" "
 			fi
@@ -332,29 +340,33 @@ function SENDTODIR
 			continue
 		fi
 
+		# check mount directory
+		MOUNT_CHECK
+		[ "$?" != "0" ] && return 1
+
 		# send data (run command)
-		LOG_INFO "Copy backup '$send' (chunks: $dlsize)"
-		error=$(eval "$cmd" 3>&1)
+		LOG_INFO "Copy backup configuration: '$backup_name', backup: '$send' (chunks: $dlsize)"
+		error=$(eval "$cmd" 3>&1 2>>/dev/null)
 
 		# check errors
 		for err in $error
 		do
 			case $err in
 				dd)
-				LOG_ERROR "Can not copy data to location"
-				continue
+				LOG_ERROR "Can not copy data to location (configuration: '$backup_name', backup: '$send')"
+				return 1
 				;;
 				enc)
-				LOG_ERROR "Can not encrypt data"
-				continue
+				LOG_ERROR "Can not encrypt data (configuration: '$backup_name', backup: '$send')"
+				return 1
 				;;
 				gz)
-				LOG_ERROR "Can not compress"
-				continue
+				LOG_ERROR "Can not compress (configuration: '$backup_name', backup: '$send')"
+				return 1
 				;;
 				btrfs)
-				LOG_ERROR "Can not read data"
-				continue
+				LOG_ERROR "Can not read data (configuration: '$backup_name', backup: '$send')"
+				return 1
 				;;
 			esac
 		done
@@ -740,7 +752,7 @@ function MOUNT_PROTOCOL
 	local directory=${2:-`LOG_ERROR "Wrong parameter: directory" 1>&2; return 2`}
 
 	# remove old functions
-	unset MOUNT UMOUNT DEFAULT_CONFIG CHECK_PROGRAMS
+	unset MOUNT UMOUNT DEFAULT_CONFIG CHECK_PROGRAMS MOUNT_CHECK
 
 	# umount directory
 	sudo umount -l "$directory" &>>/dev/null
@@ -1265,6 +1277,58 @@ function DATE_DEFORMAT
 	fi
 	}
 
+# remove pid number and exit
+function PID_EXIT
+	{
+	local code=${1:-0} 
+	lockfile-remove $PID_FILE
+	exit $code
+	}
+
+# wait for pid
+function PID_WAIT
+	{
+	# create directory
+	local path=$(dirname "$PID_FILE")
+	mkdir -p "$path"
+	lockfile-create -r $PID_TIMEOUT --use-pid $PID_FILE &>> /dev/null
+	if [ "$?" == "4" ]; then
+		LOG_ERROR "Can not lock lockfile ($PID_FILE) - timeout"
+		exit 4
+	fi
+	}
+
+function ACTIVE_DIRECTORY
+	{
+	local directory=${1:-`LOG_ERROR "Wrong parameter: directory"; return 2`}
+	[ "$?" != "0" ] && return 1
+	local parentpid=${2:-`LOG_ERROR "Wrong parameter: pid"; return 2`}
+	[ "$?" != "0" ] && return 1
+
+	local ump=$(realpath "`dirname \"$directory\"`")/$(basename "$directory")
+
+	while true
+	do
+		timeout -s 9 $ACTIVE_DIRECTORY_TIMEOUT ls "$directory" &>> /dev/null
+		if [ "$?" != "0" ]; then
+			LOG_ERROR "Directory '$directory' is not active"
+			local i
+			for i in 1 1 1
+			do
+				# force umount directory
+				umount -f $ump &>>/dev/null
+				sleep $i
+			done
+			return 0
+		else
+			sleep $ACTIVE_DIRECTORY_CHECK_TIME
+		fi
+		
+		kill -0 $parentpid &>> /dev/null
+		[ "$?" != "0" ] && return 0
+	done
+	}
+
 #######################################
 # HELP text
 #######################################
@@ -1332,6 +1396,7 @@ function HELP
 			--dry-run	Just check, do not delete bad backups
 			-l 'logfile'	Print log into file (and stdout)
 			-e 'errorfile'	Print errors into file (and stdout)
+			-y Do not prompt questions
 		" | sed 's/^\t\t//g'
 		[ "$help" != "" ] && return 0
 		;&
@@ -1349,6 +1414,7 @@ function HELP
 			--dry-run	Just check, do not delete bad backups
 			-l 'logfile'	Print log into file (and stdout)
 			-e 'errorfile'	Print errors into file (and stdout)
+			-y Do not prompt questions
 		" | sed 's/^\t\t//g'
 		[ "$help" != "" ] && return 0
 		;&
@@ -1521,11 +1587,11 @@ function CHECK_ARGUMENTS
 		:
 	# checksum and checksize
 	elif [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checksum' ]; then
-		if [ "$BACKUP_NAME" == "" ]; then
+		if [ "$BACKUP_NAME" == "" ] && [ "$YES" != "true" ]; then
 			LOG_WARNING "Backup name is not known (parameter: -b)"
 			PROMPT "Do you want to calculate checksizes for all backups?" "N" || exit 2
 		fi
-		if [ "$SERVER_NAME" == "" ]; then
+		if [ "$SERVER_NAME" == "" ] && [ "$YES" != "true" ]; then
 			LOG_WARNING "Server name is not known (parameter: -s)"
 			PROMPT "Do you want to calculate all checksizes for all servers?" "N" || exit 2
 		fi
@@ -1590,13 +1656,15 @@ if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
 	PREPARE_WORKING_DIR "$BLOCKDEV" "$SUBVOL"
 	[ $? == 0 ] || exit 3
 
+	PID_WAIT
+
 	snapshot=$(date -u $DATE_FORMAT)
 	backuppath="$WORK_BACKUP_PATH/$NAME"
 	snapshotdir="$backuppath/$snapshot"
 	sourcedir=$WORK_SOURCE_PATH
 	unset WORK_BACKUP_PATH WORK_SOURCE_PATH
 
-	LOG_INFO "Start create $TYPE backup on '$BACKUP_NAME' ($COMMENT) "
+	LOG_INFO "Start create $TYPE backup on '$BACKUP_NAME' ($COMMENT)"
 
 	# check if snapshotdir exist (backup directory - where are stored all backup snapshot)
 	if [ ! -d "$backuppath" ]; then
@@ -1608,7 +1676,7 @@ if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
 			sudo chmod 777 $backuppath/*
 		else
 			LOG_ERROR "Can not create snapshot subvolume (directory) at \"$backuppath\""
-			exit 1
+			PID_EXIT 1
 		fi
 	fi
 
@@ -1619,7 +1687,7 @@ if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
 
 		if [ "$sha1sum_names" == "" ]; then
 			LOG_ERROR "Last inc or full backup do not exist (use full backup)"
-			exit 2
+			PID_EXIT 2
 		fi
 
 		# sort and get last backup
@@ -1631,7 +1699,7 @@ if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
 		# check if last backup exist
 		if [ ! -d "$last" ]; then
 			LOG_ERROR "Cant find last inc or full backup path"
-			exit 1
+			PID_EXIT 1
 		fi
 	fi
 
@@ -1685,11 +1753,14 @@ if [ "$TYPE" == 'full' ] || [ "$TYPE" == 'inc' ]; then
 	else
 		LOG_WARNING "Can not create backup!"
 	fi
+	PID_EXIT
 
 #######################################
 # type SEND, CHECKSIZE, CHECKSUM, RESTORE, CLEANSERVER
 #######################################
 elif [ "$TYPE" == 'send' ] || [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checksum' ] || [ "$TYPE" == 'restore' ] || [ "$TYPE" == 'cleanserver' ]; then
+	# wait if process exist
+	PID_WAIT
 	# set if server name argument is avalible
 	server_dir="$CONFIG/server/"
 	[  -z "$SERVER_NAME" ] || server_dir="$server_dir/$SERVER_NAME.conf"
@@ -1729,6 +1800,14 @@ elif [ "$TYPE" == 'send' ] || [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checks
 				backup_basename=(${backup//\// })
 				backup_basename=${backup_basename[-1]/.conf/}
 
+				# check if mount is avalible
+				ACTIVE_DIRECTORY "$mountdir" "$$" &
+
+				MOUNT_CHECK
+				if [ "$?" != "0" ]; then
+					continue
+				fi
+
 				if [ "$destination_path" -ef "$CONFIG/$server" ]; then
 					if [ "$TYPE" == 'checksize' ]; then 
 						# check size
@@ -1750,12 +1829,16 @@ elif [ "$TYPE" == 'send' ] || [ "$TYPE" == 'checksize' ] || [ "$TYPE" == 'checks
 		# umount storage
 		UMOUNT "$CONFIG/$server" "$mountdir"
 	done
+	PID_EXIT 0
 
 #######################################
 # type CLEANLOCAL
 #######################################
 elif [ "$TYPE" == 'cleanlocal' ]; then
+	PID_WAIT
 	CLEAN "$BACKUP_NAME" "/"
+	PID_EXIT 0
+
 #######################################
 # type SHOWLOG
 #######################################
@@ -1763,6 +1846,7 @@ elif [ "$TYPE" == 'showlog' ]; then
 	[ -f $LOG_DIR/$SECTYPE ] || LOG_ERROR "Log file '$SECTYPE' does not exist"
 	[ -f $LOG_DIR/$SECTYPE ] || exit 2
 	tail -f -n $NUMBER $LOG_DIR/$SECTYPE | sed -e 's/^/\o033[38;5;17m/' -e "s/INFO:/\o033[0m\o033[38;5;22mINFO:\o033[0m/" -e "s/WARNING:/\o033[0m\o033[38;5;3mWARNING:\o033[0m/" -e "s/ERROR:/\o033[0m\o033[38;5;1mERROR:\o033[0m/"
+
 #######################################
 # type INSTALL
 #######################################
@@ -1800,6 +1884,11 @@ elif [ "$TYPE" == 'install' ]; then
 		CHECK_PROGRAMS
 		[ $? == 0 ] || LOG_WARNING "Dependency problem with protocol $(basename $file)"
 	done
+
+	# check programs for backup
+	which btrfs &>>/dev/null || LOG_WARNING "Dependency problem: program 'btrfs' does not exist (install package: btrfs-tools)"
+	which lockfile-create &>>/dev/null || LOG_WARNING "Dependency problem: program 'lockfile-*' does not exist (install package: lockfile-progs)"
+
 	LOG_INFO "Btbckp successfully install on your system!"
 
 #######################################
@@ -1807,6 +1896,8 @@ elif [ "$TYPE" == 'install' ]; then
 #######################################
 elif [ "$TYPE" == 'uninstall' ]; then
 	PROMPT "You really want to remove btbckp?" "N" || exit 2
+
+	PID_WAIT
 
 	# remove program
 	rm /usr/bin/btbckp &>>/dev/null
@@ -1823,6 +1914,8 @@ elif [ "$TYPE" == 'uninstall' ]; then
 	fi
 
 	LOG_INFO "Successfully remove btbckp!"
+	rm "$PID_FILE" &>>/dev/null
+	
 
 #######################################
 # type SAVE
@@ -1868,6 +1961,7 @@ elif [ "$TYPE" == 'save' ]; then
 # type BACKUP
 #######################################
 elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
+	PID_WAIT	
 	# dirname
 	[ "$TYPE" == 'backup' ] && dirname="backup"
 	[ "$TYPE" == 'server' ] && dirname="server"
@@ -1875,9 +1969,9 @@ elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
 	# remove configuration from system
 	if [ "$SECTYPE" == "rm" ]; then
 		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' does not exist (can not remove it)"
-		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || PID_EXIT 2
 		PROMPT "Do you really want to delete $dirname config file $SECTYPE" "N"
-		[ $? == 0 ] || exit 0
+		[ $? == 0 ] || PID_EXIT 0
 		rm $CONFIG/$dirname/$TERTYPE.conf
 		LOG_INFO "Config file '$TERTYPE' successfully delete from system"
 	
@@ -1885,7 +1979,7 @@ elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
 	elif [ "$SECTYPE" == "add" ]; then
 		# check if file exist
 		[ ! -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' exist (can not create new)"
-		[ ! -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+		[ ! -f $CONFIG/$dirname/$TERTYPE.conf ] || PID_EXIT 2
 
 		[ "$TYPE" == 'backup' ] && echo "
 		# Backup configuration with name '$TERTYPE'
@@ -1924,14 +2018,14 @@ elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
 
 		if [ "$TYPE" == 'server' ]; then
 			source /usr/share/btbckp/protocols/$PROTOCOL &>> /dev/null
-			[ $? != 0 ] && LOG_ERROR "Protocol '$PROTOCOL' does not exist, cant create server configuration" && exit 2
+			[ $? != 0 ] && LOG_ERROR "Protocol '$PROTOCOL' does not exist, cant create server configuration" && PID_EXIT 2
 			DEFAULT_CONFIG "$TERTYPE" > $CONFIG/$dirname/$TERTYPE.conf
 		fi
 
 	# check if file exist
 	elif [ "$SECTYPE" == "edit" ]; then
 		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || LOG_ERROR "Configuration '$TERTYPE' does not exist (can not edit it)"
-		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || exit 2
+		[ -f $CONFIG/$dirname/$TERTYPE.conf ] || PID_EXIT 2
 	elif [ "$SECTYPE" == "list" ]; then
 		LOG_INFO "Avalible $dirname configs: $(find $CONFIG/$dirname -type f -printf '%f, ' | sed -e 's/\.conf//g' -e 's/, $//g')"
 	fi
@@ -1953,7 +2047,7 @@ elif [ "$TYPE" == 'backup' ] || [ "$TYPE" == 'server' ]; then
 		sed -i -e 's/SUBDIR=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nSUB_DIR=/g' $CONFIG/backup/$TERTYPE.conf
 		sed -i -e 's/COMPRESS=/# Do not edit, if you make backup (run: btbckp inc\/full command) !!\nCOMPRESS=/g' $CONFIG/backup/$TERTYPE.conf
 	fi
-
+	PID_EXIT 0
 fi
 
 
