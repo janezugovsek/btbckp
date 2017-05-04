@@ -1,7 +1,7 @@
 # btbckp
 is a CLI backup tool for BTRFS writning in bash program language.
 
-### Current version v1.0-rc1
+### Current version v1.0-rc2
 ### Use the program at your own risk
 
 ## Features
@@ -34,6 +34,7 @@ is a CLI backup tool for BTRFS writning in bash program language.
  - openssl 1.0+
  - gzip 1.6+
  - nano 2.2.6+ (GNU nano)
+ - lockfile-progs 0.1.12
 
 Debian like distributions:
 
@@ -52,6 +53,13 @@ Debian like distributions:
 Debian like distributions:
 
 	sudo apt-get install davfs2
+
+### for cifs protocol
+ - cifs
+
+Debian like distributions:
+
+	sudo apt-get install cifs-utils
 
 # How to use it
 ## Install on system

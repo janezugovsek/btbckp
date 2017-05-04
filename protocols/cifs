@@ -2,42 +2,38 @@ function DEFAULT_CONFIG
 	{
 	local conf_name=${1:-"Unknown"}
 	echo "
-	# Server configuration '$conf_name' for protocol 'sshfs'
+	# Server configuration '$conf_name' for protocol 'cifs'
 	# Comments are begins with '#'
 	# Coding type is bash
 
 	# Type of protocol (do not change!)
-	PROTOCOL=sshfs
+	PROTOCOL=cifs
 
-	# server address hostname (or IP)
-	ADDR=localhost
-
-	# ssh server port
-	PORT=22
+	# full server address hostname (or IP)
+	ADDR=//localhost/share_name
 
 	# connection timeout (seconds)
 	TIMEOUT=10
 	
-	# ssh server username
+	# cifs server username (comment line if is not usable)
 	USER=user
+
+	# cifs server username (comment line if is not usable)
+	PASSWORD=password
+
+	# cifs server domain (comment line if is not usable)
+	DOMAIN=domain
 
 	# directory on server where will be saved backups
 	DIR=backup/
-
-	# Optional config: SSH identify
-	# path to the RSA certificate
-	# uncomment line and add certificate on location
-	# Create certificate with: sudo ssh-keygen -t rsa -b 4096 -f $CONFIG/server/sshfs/$conf_name
-	# and send public part to server: cat $CONFIG/server/sshfs/$conf_name.pub | ssh $USER@$ADDRESS "cat >> .ssh/authorized_keys"
-	# IDENTIFY=$CONFIG/server/sshfs/$conf_name
 	" | sed -e 's/^[ \t]*//'
 	}
 
 function CHECK_PROGRAMS
 	{
-	which sshfs &>>/dev/null
+	which mount.cifs &>>/dev/null
 	if [ $? != 0 ]; then
-		LOG_WARNING "SSHFS: Sshfs does not exist on computer! (please install: sshfs)"
+		LOG_WARNING "CIFS: Cifs does not exist on computer! (please install: cifs-utils)"
 		return 1
 	fi
 	return 0
@@ -51,33 +47,35 @@ function MOUNT
 
 	# set options
 	local options=""
-	[ "$IDENTIFY" != "" ] && local options=$options"IdentityFile=\"$IDENTIFY\","
+	[ "$USER" != "" ] && local options=$options"username=$USER,"
+	[ "$PASSWORD" != "" ] && local options=$options"password=$PASSWORD,"
+	[ "$DOMAIN" != "" ] && local options=$options"domain=$DOMAIN,"
 
 	# remove last comma
 	[ "$options" != "" ] && local options="-o "$options
 	options=$(echo $options | sed 's/,$//g')
 
 	# umount location (just in case)
-	umount -l "$directory" &>> /dev/null
+	umount "$directory" &>> /dev/null
 
-	timeout $TIMEOUT sshfs -p "$PORT" $options "$USER@$ADDR:" "$directory" 2>>/dev/null
+	timeout $TIMEOUT mount -t cifs $options "$ADDR" "$directory" &>>/dev/null
 	if [ $? != 0 ]; then
 		umount "$directory" &>> /dev/null
-		LOG_ERROR "SSHFS: Can not connect to server '"$(basename "$server" | sed 's/\.conf//g')"'"
-		unset USER ADDR IDENTIFY
+		LOG_ERROR "CIFS: Can not connect to server '"$(basename "$server" | sed 's/\.conf//g')"'"
+		unset USER ADDR PASSWORD DOMAIN
 		return 1
 	fi
-	unset USER ADDR IDENTIFY
+	unset USER ADDR PASSWORD DOMAIN
 
 	MOUNTPOINT="$directory"
 	MOUNTPATH="$directory"/$DIR
 	mkdir -p $MOUNTPATH 2>>/dev/null
 	if [ $? != 0 ]; then
-		LOG_ERROR "SSHFS: Can not create directory '$MOUNTPATH'"
+		LOG_ERROR "CIFS: Can not create directory '$MOUNTPATH'"
 		return 1
 	fi
 
-	LOG_INFO "SSHFS: Connect with server '"$(basename "$server" | sed 's/\.conf//g')"' is successfully"
+	LOG_INFO "CIFS: Connect with server '"$(basename "$server" | sed 's/\.conf//g')"'"
 
 	return 0
 	}
@@ -90,7 +88,7 @@ function UMOUNT
 
 	umount "$directory" &>>/dev/null
 
-	LOG_INFO "SSHFS: Unconnect with server '"$(basename "$server" | sed 's/\.conf//g')"'"
+	LOG_INFO "CIFS: Unconnect with server '"$(basename "$server" | sed 's/\.conf//g')"'"
 
 	return 0
 	}
@@ -98,8 +96,12 @@ function UMOUNT
 function MOUNT_CHECK
 	{
 	local directory=$(realpath "$MOUNTPOINT" 2>>/dev/null)
+	if [ "$?" != 0 ]; then
+		LOG_ERROR "CIFS: Directory is not mounted"
+		return 1
+	fi
 	mount | grep "$directory" &>>/dev/null
 	[ "$?" == "0" ] && return 0
-	LOG_ERROR "SSHFS: Directory '$directory' is not mounted"
+	LOG_ERROR "CIFS: Directory '$directory' is not mounted"
 	return 1
 	}
